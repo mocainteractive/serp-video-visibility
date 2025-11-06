@@ -45,31 +45,38 @@ if st.button("Avvia Analisi"):
             tiktok = contains("tiktok.com")
             instagram = contains("instagram.com")
 
-            # --- Estrazione avanzata box video ---
-            videos = []
-            possible_video_keys = ["videos", "inlineVideos", "video_results", "top_videos", "shortVideos"]
+           # --- Estrazione avanzata box video ---
+videos = []
+possible_video_keys = ["videos", "inlineVideos", "video_results", "top_videos", "shortVideos", "inline_videos", "videoResults"]
 
-            for key in possible_video_keys:
-                if key in data and isinstance(data[key], list):
-                    videos.extend(data[key])
+for key in possible_video_keys:
+    if key in data and isinstance(data[key], list):
+        videos.extend(data[key])
 
-            has_video_box = len(videos) > 0
+# Alcune SERP includono i video dentro la sezione "organic" come item di tipo video
+for item in data.get("organic", []):
+    if isinstance(item, dict) and item.get("type") == "video":
+        videos.append(item)
 
-            # Verifica se ci sono video da YouTube / TikTok / Instagram
-            youtube_present = any("youtube.com" in v.get("link", "").lower() for v in videos)
-            tiktok_present = any("tiktok.com" in v.get("link", "").lower() for v in videos)
-            instagram_present = any("instagram.com" in v.get("link", "").lower() for v in videos)
+# Controllo presenza box video o video brevi
+has_video_box = len(videos) > 0
 
-            # --- Costruzione risultati ---
-            video_sources = set()
-            for v in videos:
-                link = v.get("link", "")
-                if "youtube.com" in link:
-                    video_sources.add("YouTube")
-                elif "tiktok.com" in link:
-                    video_sources.add("TikTok")
-                elif "instagram.com" in link:
-                    video_sources.add("Instagram")
+# Verifica se nei video compaiono YouTube, TikTok o Instagram
+youtube_present = any("youtube.com" in v.get("link", "").lower() for v in videos)
+tiktok_present = any("tiktok.com" in v.get("link", "").lower() for v in videos)
+instagram_present = any("instagram.com" in v.get("link", "").lower() for v in videos)
+
+# --- Raccolta sorgenti ---
+video_sources = set()
+for v in videos:
+    link = v.get("link", "")
+    if "youtube.com" in link:
+        video_sources.add("YouTube")
+    elif "tiktok.com" in link:
+        video_sources.add("TikTok")
+    elif "instagram.com" in link:
+        video_sources.add("Instagram")
+
 
             results_data.append({
                 "Keyword": kw,

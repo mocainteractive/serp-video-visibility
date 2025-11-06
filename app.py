@@ -3,102 +3,112 @@ import pandas as pd
 import requests
 from io import BytesIO
 
+# ============== CONFIG ==============
 st.set_page_config(page_title="SERP Video Visibility", page_icon="🎥", layout="wide")
 
 st.title("🎥 SERP Video Visibility Analyzer")
-st.write("Verifica se **YouTube**, **TikTok** o **Instagram** compaiono nella SERP (organico o qualsiasi box).")
+st.write("Verifica se **YouTube**, **TikTok** o **Instagram** compaiono nella SERP (in qualunque sezione) "
+         "e se sono presenti nella **Top 10 organica**.")
 
-# ---------------- UI: Parametri ----------------
+# ============== UI PARAMS ==============
 with st.expander("🔧 Impostazioni"):
     col1, col2, col3 = st.columns(3)
     with col1:
         serper_api_key = st.text_input("API Key Serper.dev", type="password")
     with col2:
-        google_domain = st.selectbox("Dominio Google", ["google.it", "google.com", "google.es", "google.fr", "google.de"])
+        google_domain = st.selectbox(
+            "Dominio Google",
+            ["google.it", "google.com", "google.es", "google.fr", "google.de"],
+            index=0
+        )
     with col3:
-        hl = st.selectbox("Lingua (hl)", ["it", "en", "es", "fr", "de"])
-    gl = st.selectbox("Paese (gl)", ["it", "us", "es", "fr", "de"])
-    num_results = st.slider("Quanti risultati organici prelevare (per sicurezza)", min_value=10, max_value=50, value=20, step=10)
+        hl = st.selectbox("Lingua (hl)", ["it", "en", "es", "fr", "de"], index=0)
+    gl = st.selectbox("Paese (gl)", ["it", "us", "es", "fr", "de"], index=0)
+    num_results = st.slider("Quanti risultati organici prelevare", 10, 50, 20, 10)
     debug = st.checkbox("Mostra JSON di debug (prima keyword)")
 
 keywords_input = st.text_area(
     "📥 Inserisci una lista di keyword (una per riga)",
     height=180,
-    placeholder="es.\naspirapolvere\naspirapolvere senza fili\nmacchina caffè cialde"
+    placeholder="es.\naspirapolvere\nlavare tappezzeria auto\nmacchina caffè cialde"
 )
 st.caption("Suggerimento: per risultati coerenti con google.it, usa **gl=it** e **hl=it**.")
 
-# ---------------- Utilità ----------------
-SOCIAL_DOMAINS = {
-    "YouTube": "youtube.com",
-    "TikTok": "tiktok.com",
-    "Instagram": "instagram.com",
+# ============== HELPERS ==============
+SOCIAL = {
+    "YouTube": {
+        "domains": ["youtube.com", "youtu.be"],
+        "sources": ["youtube"]
+    },
+    "TikTok": {
+        "domains": ["tiktok.com", "vm.tiktok.com"],
+        "sources": ["tiktok"]
+    },
+    "Instagram": {
+        "domains": ["instagram.com"],
+        "sources": ["instagram"]
+    },
 }
 
-def in_str(s):
+def _to_str(s):
     return s if isinstance(s, str) else ""
 
-def walk_collect_links(obj, path="", acc=None):
+def walk_collect_strings(obj, acc=None):
     """
-    Traversing generico del JSON SERP.
-    Raccoglie tutte le URL (campi 'link') e la 'displayedLink' dove presente,
-    insieme al path (per eventuali debug/analisi).
+    Raccoglie *tutte* le stringhe presenti nel JSON (valori; non solo 'link').
+    Restituisce una lista di stringhe lower-case.
     """
     if acc is None:
         acc = []
-
     if isinstance(obj, dict):
-        # Se c'è un 'link', raccoglilo
-        if "link" in obj and isinstance(obj["link"], str):
-            acc.append((obj["link"], path or "root"))
-        # Alcune sezioni usano displayedLink come stringa utile al matching dominio
-        if "displayedLink" in obj and isinstance(obj["displayedLink"], str):
-            acc.append((obj["displayedLink"], (path or "root") + ".displayedLink"))
-
-        for k, v in obj.items():
-            new_path = f"{path}.{k}" if path else k
-            walk_collect_links(v, new_path, acc)
-
+        for _, v in obj.items():
+            if isinstance(v, str):
+                acc.append(v.lower())
+            elif isinstance(v, (dict, list)):
+                walk_collect_strings(v, acc)
     elif isinstance(obj, list):
-        for i, item in enumerate(obj):
-            walk_collect_links(item, f"{path}[{i}]" if path else f"[{i}]", acc)
-
+        for item in obj:
+            if isinstance(item, str):
+                acc.append(item.lower())
+            else:
+                walk_collect_strings(item, acc)
     return acc
 
-def detect_domains_anywhere(all_links):
+def detect_domains_anywhere_from_strings(strings_lower):
     """
-    Controlla se ciascun dominio dei SOCIAL_DOMAINS compare in almeno un link raccolto.
+    Presenza domini/social *ovunque* nella SERP.
+    Match su domini (es. 'tiktok.com') o su sorgenti (es. source='tiktok').
     """
-    presence = {k: False for k in SOCIAL_DOMAINS.keys()}
-    for url, _path in all_links:
-        url_l = url.lower()
-        for label, dom in SOCIAL_DOMAINS.items():
-            if dom in url_l:
-                presence[label] = True
+    presence = {k: False for k in SOCIAL.keys()}
+    for label, cfg in SOCIAL.items():
+        # Match domini
+        if any(dom in s for dom in cfg["domains"] for s in strings_lower):
+            presence[label] = True
+            continue
+        # Match 'source'
+        if any(src in s for src in cfg["sources"] for s in strings_lower):
+            presence[label] = True
     return presence
 
 def detect_domains_top10(organic):
     """
-    Controlla presenza domini nella Top 10 organica.
-    Ritorna: dict presenza, e dizionario con prime posizioni (1-based) se presenti.
+    Presenza domini nella Top 10 organica + prima posizione (1-based).
     """
-    presence = {k: False for k in SOCIAL_DOMAINS.keys()}
-    first_pos = {k: None for k in SOCIAL_DOMAINS.keys()}
+    presence = {k: False for k in SOCIAL.keys()}
+    first_pos = {k: None for k in SOCIAL.keys()}
 
     top10 = (organic or [])[:10]
     for idx, res in enumerate(top10, start=1):
-        link = in_str(res.get("link", "")).lower()
-        displayed = in_str(res.get("displayedLink", "")).lower()
-
-        for label, dom in SOCIAL_DOMAINS.items():
-            if (dom in link) or (dom in displayed):
+        link = _to_str(res.get("link", "")).lower()
+        displayed = _to_str(res.get("displayedLink", "")).lower()
+        for label, cfg in SOCIAL.items():
+            if any(dom in link for dom in cfg["domains"]) or any(dom in displayed for dom in cfg["domains"]):
                 presence[label] = True
                 if first_pos[label] is None:
                     first_pos[label] = idx
-
     return presence, first_pos
 
-# ---------------- Analisi ----------------
+# ============== MAIN ==============
 if st.button("🚀 Avvia Analisi"):
     if not serper_api_key or not keywords_input.strip():
         st.warning("⚠️ Inserisci la tua API key e almeno una keyword.")
@@ -118,7 +128,7 @@ if st.button("🚀 Avvia Analisi"):
             "gl": gl,
             "hl": hl,
             "google_domain": google_domain,
-            "num": int(num_results)  # fetcha più risultati organici, ma Top10 resta Top10
+            "num": int(num_results)
         }
 
         try:
@@ -129,31 +139,31 @@ if st.button("🚀 Avvia Analisi"):
             st.error(f"Errore con '{kw}': {e}")
             continue
 
+        # Debug solo per la prima keyword
         if debug and not first_json_shown:
             st.subheader("🧪 Debug (prima keyword)")
             st.json(data)
             first_json_shown = True
 
+        # Presenza ovunque (string-scan dell'intero JSON)
+        strings_lower = walk_collect_strings(data)
+        presence_any = detect_domains_anywhere_from_strings(strings_lower)
+
+        # Presenza Top 10 organica
         organic = data.get("organic", [])
-
-        # 1) Presenza ovunque (scansione completa del JSON)
-        all_links = walk_collect_links(data)
-        presence_any = detect_domains_anywhere(all_links)
-
-        # 2) Presenza nella Top 10 organica
         presence_top10, first_pos = detect_domains_top10(organic)
 
         rows.append({
             "Keyword": kw,
-            # Ovunque in SERP
-            "YouTube (Ovunque)": "✅" if presence_any["YouTube"] else "❌",
-            "TikTok (Ovunque)": "✅" if presence_any["TikTok"] else "❌",
-            "Instagram (Ovunque)": "✅" if presence_any["Instagram"] else "❌",
-            # Top 10 organico
+            # Ovunque
+            "YouTube (ovunque)": "✅" if presence_any["YouTube"] else "❌",
+            "TikTok (ovunque)": "✅" if presence_any["TikTok"] else "❌",
+            "Instagram (ovunque)": "✅" if presence_any["Instagram"] else "❌",
+            # Top 10 organica
             "YouTube (Top 10)": "✅" if presence_top10["YouTube"] else "❌",
             "TikTok (Top 10)": "✅" if presence_top10["TikTok"] else "❌",
             "Instagram (Top 10)": "✅" if presence_top10["Instagram"] else "❌",
-            # Prima posizione organica se presente
+            # Prima posizione se presente
             "Pos YouTube (Top 10)": first_pos["YouTube"] if first_pos["YouTube"] else "-",
             "Pos TikTok (Top 10)": first_pos["TikTok"] if first_pos["TikTok"] else "-",
             "Pos Instagram (Top 10)": first_pos["Instagram"] if first_pos["Instagram"] else "-",
@@ -164,12 +174,12 @@ if st.button("🚀 Avvia Analisi"):
         st.subheader("📊 Risultati")
         st.dataframe(df, use_container_width=True)
 
-        # --- Export CSV
+        # ---- Export CSV
         csv = df.to_csv(index=False).encode("utf-8")
         st.download_button("💾 Scarica CSV", data=csv,
                            file_name="serp_social_presence.csv", mime="text/csv")
 
-        # --- Export Excel
+        # ---- Export Excel
         bio = BytesIO()
         with pd.ExcelWriter(bio, engine="openpyxl") as writer:
             df.to_excel(writer, index=False, sheet_name="Risultati")

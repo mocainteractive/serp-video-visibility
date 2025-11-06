@@ -83,7 +83,16 @@ if st.button("Avvia Analisi"):
                 "Sorgenti Box Video": ", ".join(video_sources) if video_sources else "-"
             })
 
-        # --- RISULTATI ---
+              # --- RISULTATI ---
         df = pd.DataFrame(results_data)
         st.subheader("📊 Risultati Analisi")
-        st.dataframe(df, use_container_width
+        st.dataframe(df, use_container_width=True)
+
+        # --- ESPORTAZIONE ---
+        csv = df.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            "💾 Scarica CSV",
+            data=csv,
+            file_name="serp_video_visibility.csv",
+            mime="text/csv"
+        )

@@ -8,7 +8,7 @@ st.set_page_config(page_title="SERP Video Visibility", page_icon="🎥", layout=
 
 st.title("🎥 SERP Video Visibility Analyzer")
 st.write("Verifica se **YouTube**, **TikTok** o **Instagram** compaiono nella SERP (in qualunque sezione) "
-         "e se sono presenti nella **Top 10 organica**.")
+         "e se sono presenti nella **Top 10 organica**. Include diagnostica per capire dove vengono trovati.")
 
 # ============== UI PARAMS ==============
 with st.expander("🔧 Impostazioni"):
@@ -25,7 +25,8 @@ with st.expander("🔧 Impostazioni"):
         hl = st.selectbox("Lingua (hl)", ["it", "en", "es", "fr", "de"], index=0)
     gl = st.selectbox("Paese (gl)", ["it", "us", "es", "fr", "de"], index=0)
     num_results = st.slider("Quanti risultati organici prelevare", 10, 50, 20, 10)
-    debug = st.checkbox("Mostra JSON di debug (prima keyword)")
+    relaxed = st.checkbox("Usa match 'rilassato' (matcha anche la parola 'tiktok'/'youtube'/'instagram')", value=True)
+    debug = st.checkbox("Mostra JSON di debug (prima keyword)", value=False)
 
 keywords_input = st.text_area(
     "📥 Inserisci una lista di keyword (una per riga)",
@@ -37,58 +38,91 @@ st.caption("Suggerimento: per risultati coerenti con google.it, usa **gl=it** e 
 # ============== HELPERS ==============
 SOCIAL = {
     "YouTube": {
-        "domains": ["youtube.com", "youtu.be"],
-        "sources": ["youtube"]
+        "domains": ["youtube.com", "youtu.be", "m.youtube.com"],
+        "sources": ["youtube"],
+        "relaxed": ["youtube"]  # parole chiave per match rilassato
     },
     "TikTok": {
-        "domains": ["tiktok.com", "vm.tiktok.com"],
-        "sources": ["tiktok"]
+        "domains": [
+            "tiktok.com", "vm.tiktok.com", "vt.tiktok.com", "m.tiktok.com",
+            "tiktokv.com", "tiktokcdn.com"  # spesso in thumbnail/CDN
+        ],
+        "sources": ["tiktok"],
+        "relaxed": ["tiktok"]  # parole chiave per match rilassato
     },
     "Instagram": {
-        "domains": ["instagram.com"],
-        "sources": ["instagram"]
+        "domains": ["instagram.com", "m.instagram.com"],
+        "sources": ["instagram"],
+        "relaxed": ["instagram", "ig "]  # 'ig ' per evitare falsi positivi
     },
 }
 
 def _to_str(s):
     return s if isinstance(s, str) else ""
 
-def walk_collect_strings(obj, acc=None):
+def walk_collect_strings_with_paths(obj, path="", acc=None):
     """
-    Raccoglie *tutte* le stringhe presenti nel JSON (valori; non solo 'link').
-    Restituisce una lista di stringhe lower-case.
+    Raccoglie tutte le stringhe presenti nel JSON *con il path* del campo.
+    Ritorna lista di tuple: (string_lower, path_string).
     """
     if acc is None:
         acc = []
     if isinstance(obj, dict):
-        for _, v in obj.items():
+        for k, v in obj.items():
+            new_path = f"{path}.{k}" if path else k
             if isinstance(v, str):
-                acc.append(v.lower())
+                acc.append((v.lower(), new_path))
             elif isinstance(v, (dict, list)):
-                walk_collect_strings(v, acc)
+                walk_collect_strings_with_paths(v, new_path, acc)
     elif isinstance(obj, list):
-        for item in obj:
+        for i, item in enumerate(obj):
+            new_path = f"{path}[{i}]" if path else f"[{i}]"
             if isinstance(item, str):
-                acc.append(item.lower())
+                acc.append((item.lower(), new_path))
             else:
-                walk_collect_strings(item, acc)
+                walk_collect_strings_with_paths(item, new_path, acc)
     return acc
 
-def detect_domains_anywhere_from_strings(strings_lower):
+def detect_domains_anywhere(strings_with_paths, relaxed_mode=False, max_hits_per_label=5):
     """
-    Presenza domini/social *ovunque* nella SERP.
-    Match su domini (es. 'tiktok.com') o su sorgenti (es. source='tiktok').
+    Presenza domini/social ovunque nella SERP.
+    - strict: match su domini noti (tiktok.com, etc.) o 'source' noti (tiktok, youtube...)
+    - relaxed: se strict fallisce, matcha anche parole chiave ('tiktok', 'youtube', 'instagram') ovunque.
+    Restituisce:
+      presence: {label: bool}
+      hits: {label: [(snippet, path), ...]}  # esempi di match
     """
     presence = {k: False for k in SOCIAL.keys()}
+    hits = {k: [] for k in SOCIAL.keys()}
+
+    # pass 1: strict (domains + sources)
     for label, cfg in SOCIAL.items():
-        # Match domini
-        if any(dom in s for dom in cfg["domains"] for s in strings_lower):
-            presence[label] = True
-            continue
-        # Match 'source'
-        if any(src in s for src in cfg["sources"] for s in strings_lower):
-            presence[label] = True
-    return presence
+        doms = cfg["domains"]
+        srcs = cfg["sources"]
+
+        for s, p in strings_with_paths:
+            if presence[label] and len(hits[label]) >= max_hits_per_label:
+                continue
+            if any(dom in s for dom in doms) or any(src in s for src in srcs):
+                presence[label] = True
+                # salva snippet (accorciato) + path
+                snippet = s[:140] + ("…" if len(s) > 140 else "")
+                hits[label].append((snippet, p))
+
+    # pass 2: relaxed (keyword 'tiktok' ecc.) solo se non trovato in strict
+    if relaxed_mode:
+        for label, cfg in SOCIAL.items():
+            if presence[label]:
+                continue
+            for s, p in strings_with_paths:
+                if presence[label] and len(hits[label]) >= max_hits_per_label:
+                    continue
+                if any(tok in s for tok in cfg.get("relaxed", [])):
+                    presence[label] = True
+                    snippet = s[:140] + ("…" if len(s) > 140 else "")
+                    hits[label].append((snippet, p))
+
+    return presence, hits
 
 def detect_domains_top10(organic):
     """
@@ -141,13 +175,13 @@ if st.button("🚀 Avvia Analisi"):
 
         # Debug solo per la prima keyword
         if debug and not first_json_shown:
-            st.subheader("🧪 Debug (prima keyword)")
+            st.subheader("🧪 Debug (prima keyword) – payload Serper")
             st.json(data)
             first_json_shown = True
 
-        # Presenza ovunque (string-scan dell'intero JSON)
-        strings_lower = walk_collect_strings(data)
-        presence_any = detect_domains_anywhere_from_strings(strings_lower)
+        # Presenza ovunque (con diagnosi)
+        strings_with_paths = walk_collect_strings_with_paths(data)
+        presence_any, hits = detect_domains_anywhere(strings_with_paths, relaxed_mode=relaxed, max_hits_per_label=5)
 
         # Presenza Top 10 organica
         organic = data.get("organic", [])
@@ -168,6 +202,16 @@ if st.button("🚀 Avvia Analisi"):
             "Pos TikTok (Top 10)": first_pos["TikTok"] if first_pos["TikTok"] else "-",
             "Pos Instagram (Top 10)": first_pos["Instagram"] if first_pos["Instagram"] else "-",
         })
+
+        # Pannello diagnostico snello per ogni keyword (se ci sono hit)
+        with st.expander(f"🧭 Diagnostica match - {kw}", expanded=False):
+            for label in ["YouTube", "TikTok", "Instagram"]:
+                if hits[label]:
+                    st.markdown(f"**{label}**: trovati {len(hits[label])} hit (mostro fino a 5)")
+                    for snippet, p in hits[label]:
+                        st.code(f"[{label}] {snippet}\npath: {p}")
+                else:
+                    st.markdown(f"**{label}**: nessun hit")
 
     if rows:
         df = pd.DataFrame(rows)

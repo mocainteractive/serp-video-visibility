@@ -2,18 +2,19 @@ import streamlit as st
 import pandas as pd
 import requests
 
+# --- CONFIGURAZIONE PAGINA ---
 st.set_page_config(page_title="SERP Video Visibility", page_icon="🎥", layout="wide")
 
 st.title("🎥 SERP Video Visibility Analyzer")
 st.write("Analizza la presenza di **YouTube**, **TikTok** e **Instagram** nelle SERP di Google.")
 
-# --- Input utente ---
+# --- INPUT UTENTE ---
 st.subheader("🔑 Impostazioni API e Parametri")
 serper_api_key = st.text_input("Inserisci la tua API Key di Serper.dev", type="password")
 google_domain = st.selectbox("Seleziona il dominio Google", ["google.it", "google.com", "google.es", "google.fr"])
 keywords_input = st.text_area("Inserisci una lista di keyword (una per riga)")
 
-# --- Analisi SERP ---
+# --- ANALISI SERP ---
 if st.button("Avvia Analisi"):
     if not serper_api_key or not keywords_input:
         st.warning("⚠️ Inserisci la tua API key e almeno una keyword.")
@@ -34,10 +35,8 @@ if st.button("Avvia Analisi"):
                 st.error(f"Errore con la keyword {kw}: {e}")
                 continue
 
-            # Analisi risultati
+            # --- Estrazione organici ---
             organic = data.get("organic", [])
-            videos_box = data.get("videos", [])
-            short_videos = data.get("shortVideos", [])
 
             def contains(domain):
                 return any(domain in res.get("link", "") for res in organic)
@@ -46,13 +45,25 @@ if st.button("Avvia Analisi"):
             tiktok = contains("tiktok.com")
             instagram = contains("instagram.com")
 
-            # Box video
-            box_present = bool(videos_box)
-            short_box_present = bool(short_videos)
+            # --- Estrazione avanzata box video ---
+            videos = []
+            possible_video_keys = ["videos", "inlineVideos", "video_results", "top_videos", "shortVideos"]
 
+            for key in possible_video_keys:
+                if key in data and isinstance(data[key], list):
+                    videos.extend(data[key])
+
+            has_video_box = len(videos) > 0
+
+            # Verifica se ci sono video da YouTube / TikTok / Instagram
+            youtube_present = any("youtube.com" in v.get("link", "").lower() for v in videos)
+            tiktok_present = any("tiktok.com" in v.get("link", "").lower() for v in videos)
+            instagram_present = any("instagram.com" in v.get("link", "").lower() for v in videos)
+
+            # --- Costruzione risultati ---
             video_sources = set()
-            for box in videos_box + short_videos:
-                link = box.get("link", "")
+            for v in videos:
+                link = v.get("link", "")
                 if "youtube.com" in link:
                     video_sources.add("YouTube")
                 elif "tiktok.com" in link:
@@ -65,15 +76,14 @@ if st.button("Avvia Analisi"):
                 "YouTube (Top 10)": "✅" if youtube else "❌",
                 "TikTok (Top 10)": "✅" if tiktok else "❌",
                 "Instagram (Top 10)": "✅" if instagram else "❌",
-                "Box Video": "✅" if box_present else "❌",
-                "Box Video Brevi": "✅" if short_box_present else "❌",
+                "Box Video Presente": "✅" if has_video_box else "❌",
+                "Video YouTube": "✅" if youtube_present else "❌",
+                "Video TikTok": "✅" if tiktok_present else "❌",
+                "Video Instagram": "✅" if instagram_present else "❌",
                 "Sorgenti Box Video": ", ".join(video_sources) if video_sources else "-"
             })
 
+        # --- RISULTATI ---
         df = pd.DataFrame(results_data)
         st.subheader("📊 Risultati Analisi")
-        st.dataframe(df, use_container_width=True)
-
-        # --- Esportazione ---
-        csv = df.to_csv(index=False).encode("utf-8")
-        st.download_button("💾 Scarica CSV", data=csv, file_name="serp_video_visibility.csv", mime="text/csv")
+        st.dataframe(df, use_container_width
